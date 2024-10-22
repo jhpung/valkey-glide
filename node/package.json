@@ -73,6 +73,9 @@
             "docs/"
         ]
     },
+    "engines": {
+        "node": "^16.20.0"
+    },
     "//": [
         "The fields below have been commented out and are only necessary for publishing the package."
     ],
