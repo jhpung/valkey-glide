@@ -4,6 +4,7 @@
 
 import { ClusterScanCursor, Script } from "glide-rs";
 import * as net from "net";
+import { Writer } from "protobufjs";
 import {
     AdvancedBaseClientConfiguration,
     BaseClient,
@@ -13,10 +14,12 @@ import {
     GlideRecord,
     GlideReturnType,
     GlideString,
+    InvokeScriptOptions,
     PubSubMsg,
     convertGlideRecordToRecord,
 } from "./BaseClient";
 import {
+    ClusterScanOptions,
     FlushMode,
     FunctionListOptions,
     FunctionListResponse,
@@ -24,7 +27,6 @@ import {
     FunctionStatsSingleResponse,
     InfoOptions,
     LolwutOptions,
-    ClusterScanOptions,
     createClientGetName,
     createClientId,
     createConfigGet,
@@ -634,11 +636,41 @@ export class GlideClusterClient extends BaseClient {
         cursor: ClusterScanCursor,
         options?: ClusterScanOptions & DecoderOption,
     ): Promise<[ClusterScanCursor, GlideString[]]> {
+        this.ensureClientIsOpen();
         // separate decoder option from scan options
-        const { decoder, ...scanOptions } = options || {};
+        const { decoder = this.defaultDecoder, ...scanOptions } = options || {};
         const cursorId = cursor.getCursor();
         const command = this.scanOptionsToProto(cursorId, scanOptions);
-        return this.createWritePromise(command, { decoder });
+
+        return new Promise((resolve, reject) => {
+            const callbackIdx = this.getCallbackIndex();
+            this.promiseCallbackFunctions[callbackIdx] = [
+                (resolveAns: [ClusterScanCursor, GlideString[]]) => {
+                    try {
+                        resolve([
+                            new ClusterScanCursor(resolveAns[0].toString()),
+                            resolveAns[1],
+                        ]);
+                    } catch (error) {
+                        reject(error);
+                    }
+                },
+                reject,
+                decoder,
+            ];
+            this.writeOrBufferRequest(
+                new command_request.CommandRequest({
+                    callbackIdx,
+                    clusterScan: command,
+                }),
+                (message: command_request.CommandRequest, writer: Writer) => {
+                    command_request.CommandRequest.encodeDelimited(
+                        message,
+                        writer,
+                    );
+                },
+            );
+        });
     }
 
     /**
@@ -1755,17 +1787,18 @@ export class GlideClusterClient extends BaseClient {
      */
     public async invokeScriptWithRoute(
         script: Script,
-        options?: { args?: GlideString[] } & DecoderOption & RouteOption,
+        options?: InvokeScriptOptions,
     ): Promise<ClusterResponse<GlideReturnType>> {
         const scriptInvocation = command_request.ScriptInvocation.create({
             hash: script.getHash(),
             keys: [],
             args: options?.args?.map(Buffer.from),
         });
-        return this.createWritePromise<ClusterGlideRecord<GlideReturnType>>(
-            scriptInvocation,
-            options,
-        ).then((res) => convertClusterGlideRecord(res, true, options?.route));
+        return this.createScriptInvocationPromise<
+            ClusterGlideRecord<GlideReturnType>
+        >(scriptInvocation, options).then((res) =>
+            convertClusterGlideRecord(res, true, options?.route),
+        );
     }
 
     /**
